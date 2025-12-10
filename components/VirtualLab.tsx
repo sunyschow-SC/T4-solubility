@@ -1,61 +1,207 @@
-import React, { useState, useEffect } from 'react';
-import { LAB_SOLUTIONS, IONS } from '../constants';
-import { PrecipitateResult, Solution } from '../types';
-import { Beaker, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { LAB_SOLUTIONS } from '../constants';
+import { Solution } from '../types';
+import { Beaker, RefreshCw, Play, RotateCcw } from 'lucide-react';
+
+interface ParticleObj {
+  id: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  symbol: string;
+  color: string;
+  type: 'cation' | 'anion';
+  isStuck: boolean;
+  bondedId: string | null;
+}
 
 const VirtualLab: React.FC = () => {
   const [solA, setSolA] = useState<Solution>(LAB_SOLUTIONS[0]);
   const [solB, setSolB] = useState<Solution>(LAB_SOLUTIONS[1]);
-  const [isMixed, setIsMixed] = useState(false);
-  const [result, setResult] = useState<PrecipitateResult | null>(null);
+  const [isReacting, setIsReacting] = useState(false);
+  const [precipitateCount, setPrecipitateCount] = useState(0);
+  const [renderParticles, setRenderParticles] = useState<ParticleObj[]>([]);
 
-  const handleMix = () => {
-    setIsMixed(true);
-    
-    // Logic for precipitation based on rules
-    // 1. Check combinations of cations and anions
-    const catA = solA.cation;
-    const anA = solA.anion;
-    const catB = solB.cation;
-    const anB = solB.anion;
+  // Simulation State Refs (Mutable to avoid re-renders during animation)
+  const physicsRef = useRef<ParticleObj[]>([]);
+  const requestRef = useRef<number>(0);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-    // Possible new compounds: (CatA + AnB) and (CatB + AnA)
-    // We only care if one is insoluble.
+  // Initialize Particles based on selection
+  const initParticles = useCallback(() => {
+    const newParticles: ParticleObj[] = [];
     
-    const checkInsoluble = (cat: string, an: string): { insol: boolean, color: string } => {
-      // Simplistic rule checker based on the provided table data
-      // Ag
-      if (cat === 'Ag⁺' && (an === 'Cl⁻' || an === 'I⁻' || an === 'CO₃²⁻' || an === 'OH⁻')) return { insol: true, color: an === 'I⁻' ? 'bg-yellow-200' : 'bg-white' };
-      // Pb
-      if (cat === 'Pb²⁺' && (an === 'Cl⁻' || an === 'I⁻' || an === 'SO₄²⁻' || an === 'CO₃²⁻' || an === 'OH⁻')) return { insol: true, color: an === 'I⁻' ? 'bg-yellow-400' : 'bg-white' };
-      // Ba
-      if (cat === 'Ba²⁺' && (an === 'SO₄²⁻' || an === 'CO₃²⁻')) return { insol: true, color: 'bg-white' };
-      // Ca
-      if (cat === 'Ca²⁺' && (an === 'SO₄²⁻' || an === 'CO₃²⁻')) return { insol: true, color: 'bg-white' }; // CaSO4 slightly insol, treated as ppt here
-      // Mg
-      if (cat === 'Mg²⁺' && (an === 'CO₃²⁻' || an === 'OH⁻')) return { insol: true, color: 'bg-white' };
-      // Cu
-      if (cat === 'Cu²⁺' && (an === 'CO₃²⁻' || an === 'OH⁻')) return { insol: true, color: 'bg-blue-400' };
-      // Fe (not in list but good to be safe)
-      
-      return { insol: false, color: '' };
+    const createIons = (sol: Solution, sourceId: string) => {
+      // Create 5 cations and 5 anions for each solution
+      for (let i = 0; i < 5; i++) {
+        newParticles.push({
+          id: `${sourceId}-cat-${i}`,
+          x: Math.random() * 80 + 10,
+          y: Math.random() * 80 + 10,
+          vx: (Math.random() - 0.5) * 0.4,
+          vy: (Math.random() - 0.5) * 0.4,
+          symbol: sol.cation.symbol,
+          color: sol.cation.color,
+          type: 'cation',
+          isStuck: false,
+          bondedId: null
+        });
+        newParticles.push({
+          id: `${sourceId}-an-${i}`,
+          x: Math.random() * 80 + 10,
+          y: Math.random() * 80 + 10,
+          vx: (Math.random() - 0.5) * 0.4,
+          vy: (Math.random() - 0.5) * 0.4,
+          symbol: sol.anion.symbol,
+          color: sol.anion.color,
+          type: 'anion',
+          isStuck: false,
+          bondedId: null
+        });
+      }
     };
 
-    const res1 = checkInsoluble(catA.symbol, anB.symbol);
-    const res2 = checkInsoluble(catB.symbol, anA.symbol);
+    createIons(solA, 'A');
+    createIons(solB, 'B');
+    
+    physicsRef.current = newParticles;
+    setRenderParticles([...newParticles]); // Trigger render of DOM elements
+    setPrecipitateCount(0);
+  }, [solA, solB]);
 
-    if (res1.insol) {
-      setResult({ hasPrecipitate: true, color: res1.color, precipitateIons: [catA.symbol, anB.symbol] });
-    } else if (res2.insol) {
-      setResult({ hasPrecipitate: true, color: res2.color, precipitateIons: [catB.symbol, anA.symbol] });
-    } else {
-      setResult({ hasPrecipitate: false });
-    }
+  // Handle Reset / Init
+  useEffect(() => {
+    setIsReacting(false);
+    initParticles();
+    return () => cancelAnimationFrame(requestRef.current);
+  }, [initParticles]);
+
+  // Solubility Check Helper
+  const isPairInsoluble = (p1: ParticleObj, p2: ParticleObj) => {
+    // Only Cation + Anion react
+    if (p1.type === p2.type) return false;
+
+    const cat = p1.type === 'cation' ? p1 : p2;
+    const an = p1.type === 'anion' ? p1 : p2;
+    const cSym = cat.symbol;
+    const aSym = an.symbol;
+
+    // Rules logic matches constants.ts
+    // Ag+
+    if (cSym === 'Ag⁺' && ['Cl⁻','I⁻','CO₃²⁻','OH⁻','Br⁻'].includes(aSym)) return true;
+    // Pb2+
+    if (cSym === 'Pb²⁺' && ['Cl⁻','I⁻','SO₄²⁻','CO₃²⁻','OH⁻','Br⁻'].includes(aSym)) return true;
+    // Ba2+
+    if (cSym === 'Ba²⁺' && ['SO₄²⁻','CO₃²⁻'].includes(aSym)) return true;
+    // Ca2+
+    if (cSym === 'Ca²⁺' && ['SO₄²⁻','CO₃²⁻'].includes(aSym)) return true;
+    // Mg2+
+    if (cSym === 'Mg²⁺' && ['CO₃²⁻','OH⁻'].includes(aSym)) return true;
+    // Cu2+
+    if (cSym === 'Cu²⁺' && ['CO₃²⁻','OH⁻'].includes(aSym)) return true;
+
+    return false;
   };
 
-  const handleReset = () => {
-    setIsMixed(false);
-    setResult(null);
+  // Animation Loop
+  const animate = useCallback(() => {
+    const particles = physicsRef.current;
+    let currentPpt = 0;
+
+    // 1. Update Physics
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+
+      if (p.isStuck) {
+        // Sinking behavior
+        if (p.y < 92) {
+            p.y += 0.3; // Sink speed
+        } else {
+            p.vx = 0;
+            p.vy = 0;
+        }
+        currentPpt++;
+      } else {
+        // Floating behavior
+        p.x += p.vx;
+        p.y += p.vy;
+
+        // Wall collisions
+        if (p.x <= 2 || p.x >= 98) p.vx *= -1;
+        if (p.y <= 2 || p.y >= 96) p.vy *= -1;
+      }
+
+      // Update DOM
+      const el = document.getElementById(p.id);
+      if (el) {
+        el.style.left = `${p.x}%`;
+        el.style.top = `${p.y}%`;
+      }
+    }
+
+    // 2. Collision Detection (Only when Reaction Started)
+    if (isReacting) {
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const p1 = particles[i];
+          const p2 = particles[j];
+
+          // Skip if already stuck
+          if (p1.isStuck || p2.isStuck) continue;
+
+          // Calculate distance
+          const dx = p1.x - p2.x;
+          const dy = p1.y - p2.y;
+          // Approximate aspect ratio correction (assuming square-ish beaker for simplicity, 
+          // or roughly equal unit scale in % for small distances)
+          const dist = Math.sqrt(dx*dx + dy*dy);
+
+          if (dist < 5) { // Collision threshold
+             if (isPairInsoluble(p1, p2)) {
+                 // REACT: Form precipitate
+                 p1.isStuck = true;
+                 p2.isStuck = true;
+                 p1.bondedId = p2.id;
+                 p2.bondedId = p1.id;
+
+                 // Snap together
+                 const midX = (p1.x + p2.x) / 2;
+                 const midY = (p1.y + p2.y) / 2;
+                 p1.x = midX - 1.5;
+                 p1.y = midY;
+                 p2.x = midX + 1.5;
+                 p2.y = midY;
+             } else {
+                 // BOUNCE: Elastic collision (simplified)
+                 // Simply swap velocities to simulate momentum transfer
+                 const tempVx = p1.vx;
+                 const tempVy = p1.vy;
+                 p1.vx = p2.vx;
+                 p1.vy = p2.vy;
+                 p2.vx = tempVx;
+                 p2.vy = tempVy;
+                 
+                 // Separate slightly to prevent sticking
+                 p1.x += p1.vx * 2;
+                 p1.y += p1.vy * 2;
+             }
+          }
+        }
+      }
+    }
+
+    setPrecipitateCount(Math.floor(currentPpt / 2));
+    requestRef.current = requestAnimationFrame(animate);
+  }, [isReacting]);
+
+  useEffect(() => {
+    requestRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(requestRef.current);
+  }, [animate]);
+
+  const toggleReaction = () => {
+    setIsReacting(prev => !prev);
   };
 
   return (
@@ -71,10 +217,10 @@ const VirtualLab: React.FC = () => {
           <div className="p-4 bg-slate-50 rounded-lg border border-slate-200">
             <label className="block text-sm font-medium text-slate-700 mb-2">Solution A</label>
             <select 
-              disabled={isMixed}
+              disabled={isReacting}
               value={solA.id} 
               onChange={(e) => setSolA(LAB_SOLUTIONS.find(s => s.id === e.target.value) || solA)}
-              className="w-full p-2 rounded border border-slate-300 focus:ring-2 focus:ring-indigo-500"
+              className="w-full p-2 rounded border border-slate-300 focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
             >
               {LAB_SOLUTIONS.map(s => <option key={s.id} value={s.id}>{s.name} ({s.formula})</option>)}
             </select>
@@ -83,10 +229,10 @@ const VirtualLab: React.FC = () => {
           <div className="p-4 bg-slate-50 rounded-lg border border-slate-200">
             <label className="block text-sm font-medium text-slate-700 mb-2">Solution B</label>
             <select 
-              disabled={isMixed}
+              disabled={isReacting}
               value={solB.id} 
               onChange={(e) => setSolB(LAB_SOLUTIONS.find(s => s.id === e.target.value) || solB)}
-              className="w-full p-2 rounded border border-slate-300 focus:ring-2 focus:ring-indigo-500"
+              className="w-full p-2 rounded border border-slate-300 focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
             >
               {LAB_SOLUTIONS.filter(s => s.id !== solA.id).map(s => <option key={s.id} value={s.id}>{s.name} ({s.formula})</option>)}
             </select>
@@ -94,132 +240,56 @@ const VirtualLab: React.FC = () => {
 
           <div className="flex gap-4">
             <button 
-              onClick={handleMix} 
-              disabled={isMixed}
-              className={`flex-1 py-3 rounded-lg font-bold text-white transition ${isMixed ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+              onClick={toggleReaction} 
+              className={`flex-1 py-3 px-4 rounded-lg font-bold text-white transition flex items-center justify-center gap-2 ${isReacting ? 'bg-red-500 hover:bg-red-600' : 'bg-indigo-600 hover:bg-indigo-700'}`}
             >
-              Mix Solutions
-            </button>
-            <button 
-              onClick={handleReset}
-              className="px-4 py-3 rounded-lg border-2 border-slate-300 text-slate-600 hover:bg-slate-100"
-            >
-              <RefreshCw className="w-6 h-6" />
+              {isReacting ? <><RotateCcw className="w-5 h-5"/> Reset / Stop</> : <><Play className="w-5 h-5"/> Mix & React</>}
             </button>
           </div>
           
-          {isMixed && result && (
-             <div className={`p-4 rounded-lg text-center ${result.hasPrecipitate ? 'bg-green-100 border border-green-300' : 'bg-blue-50 border border-blue-200'}`}>
-                {result.hasPrecipitate ? (
-                    <div>
-                        <h3 className="text-lg font-bold text-green-800 mb-1">Precipitate Formed!</h3>
-                        <p className="text-green-700">Insoluble solid detected.</p>
-                        <p className="text-sm text-green-600 mt-2">Check the beaker to see which ions combined.</p>
-                    </div>
-                ) : (
-                    <div>
-                        <h3 className="text-lg font-bold text-blue-800">No Reaction</h3>
-                        <p className="text-blue-700">All ions remain dissolved.</p>
-                    </div>
-                )}
-             </div>
-          )}
+          <div className={`p-4 rounded-lg text-center transition-colors duration-500 ${precipitateCount > 0 ? 'bg-green-100 border border-green-300' : 'bg-slate-100 border border-slate-200'}`}>
+            {precipitateCount > 0 ? (
+                <div>
+                    <h3 className="text-lg font-bold text-green-800 mb-1">Precipitate Forming!</h3>
+                    <p className="text-green-700">{precipitateCount} particle pairs bonded.</p>
+                </div>
+            ) : (
+                <div>
+                    <h3 className="text-lg font-bold text-slate-700">{isReacting ? "Monitoring..." : "Ready to Mix"}</h3>
+                    <p className="text-slate-600 text-sm">
+                        {isReacting ? "Particles are colliding. Watch for bonding." : "Select solutions and click Mix to start."}
+                    </p>
+                </div>
+            )}
+          </div>
         </div>
 
         {/* Visualizer */}
         <div className="relative h-80 bg-slate-100 rounded-xl border-2 border-slate-300 overflow-hidden flex items-end justify-center shadow-inner">
-          {/* Beaker Glass */}
-          <div className="relative w-48 h-64 border-b-4 border-l-4 border-r-4 border-slate-400/50 rounded-b-3xl bg-white/30 backdrop-blur-sm overflow-hidden mb-4">
+          <div ref={containerRef} className="relative w-56 h-72 border-b-4 border-l-4 border-r-4 border-slate-400/50 rounded-b-3xl bg-white/30 backdrop-blur-sm overflow-hidden mb-4">
              {/* Liquid */}
-             <div className={`absolute bottom-0 left-0 right-0 h-4/5 transition-colors duration-1000 ${isMixed ? (result?.hasPrecipitate ? 'bg-slate-100' : 'bg-blue-50/50') : 'bg-blue-50/30'}`}>
-                
-                {/* Particles */}
-                {/* We render a set of ions. Before mix: just A. After mix: A + B. */}
-                <div className="absolute inset-0 p-4">
-                    {/* Solution A Ions */}
-                    {Array.from({length: 4}).map((_, i) => (
-                        <Particle 
-                            key={`a-cat-${i}`} 
-                            symbol={solA.cation.symbol} 
-                            color={solA.cation.color} 
-                            isPrecipitating={isMixed && result?.hasPrecipitate && result.precipitateIons?.includes(solA.cation.symbol)}
-                            delay={i * 0.5}
-                        />
-                    ))}
-                    {Array.from({length: 4}).map((_, i) => (
-                        <Particle 
-                            key={`a-an-${i}`} 
-                            symbol={solA.anion.symbol} 
-                            color={solA.anion.color} 
-                            isPrecipitating={isMixed && result?.hasPrecipitate && result.precipitateIons?.includes(solA.anion.symbol)}
-                            delay={i * 0.7}
-                        />
-                    ))}
-
-                    {/* Solution B Ions (Only appear if mixed) */}
-                    {isMixed && Array.from({length: 4}).map((_, i) => (
-                        <Particle 
-                            key={`b-cat-${i}`} 
-                            symbol={solB.cation.symbol} 
-                            color={solB.cation.color} 
-                            isPrecipitating={result?.hasPrecipitate && result.precipitateIons?.includes(solB.cation.symbol)}
-                            delay={i * 0.4}
-                        />
-                    ))}
-                    {isMixed && Array.from({length: 4}).map((_, i) => (
-                        <Particle 
-                            key={`b-an-${i}`} 
-                            symbol={solB.anion.symbol} 
-                            color={solB.anion.color} 
-                            isPrecipitating={result?.hasPrecipitate && result.precipitateIons?.includes(solB.anion.symbol)}
-                            delay={i * 0.6}
-                        />
-                    ))}
-
-                    {/* Sediment Layer */}
-                    {isMixed && result?.hasPrecipitate && (
-                        <div className={`absolute bottom-0 left-0 right-0 h-8 ${result.color} opacity-80 rounded-b-xl animate-pulse`}>
-                            <span className="absolute w-full text-center text-[10px] font-bold bottom-1 opacity-50">Precipitate</span>
-                        </div>
-                    )}
-                </div>
+             <div className="absolute inset-0 bg-blue-50/40">
+                {renderParticles.map((p) => (
+                    <div 
+                        key={p.id}
+                        id={p.id}
+                        className={`absolute flex items-center justify-center w-8 h-8 rounded-full shadow-sm text-[10px] font-bold border border-slate-300 select-none ${p.color}`}
+                        style={{ left: `${p.x}%`, top: `${p.y}%`, transform: 'translate(-50%, -50%)' }}
+                    >
+                        {p.symbol}
+                    </div>
+                ))}
              </div>
           </div>
-          <div className="absolute bottom-2 text-slate-400 text-sm font-mono">Beaker View</div>
+          <div className="absolute bottom-2 text-slate-400 text-sm font-mono">Real-time Simulation</div>
         </div>
       </div>
       
       <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200 text-sm text-yellow-800">
-        <strong>Tip:</strong> Observe the particles. If a precipitate forms, the specific positive and negative ions responsible will clamp together at the bottom!
+        <strong>Tip:</strong> The particles from both solutions are now in the beaker. Click <strong>Mix & React</strong> to let them chemically interact. If they form an insoluble compound, they will stick together and sink!
       </div>
     </div>
   );
-};
-
-// Helper component for floating particles
-const Particle: React.FC<{ symbol: string; color: string; isPrecipitating?: boolean; delay: number }> = ({ symbol, color, isPrecipitating, delay }) => {
-    // If precipitating, we force them to bottom
-    const style = isPrecipitating 
-        ? { 
-            bottom: `${Math.random() * 20 + 5}px`, 
-            left: `${Math.random() * 80 + 10}%`,
-            transition: 'all 2s ease-in-out'
-          }
-        : {
-            animation: `float ${3 + Math.random()}s infinite ease-in-out alternate`,
-            animationDelay: `-${delay}s`,
-            top: `${Math.random() * 60 + 10}%`,
-            left: `${Math.random() * 80 + 10}%`
-        };
-
-    return (
-        <div 
-            className={`absolute flex items-center justify-center w-8 h-8 rounded-full shadow-sm text-[10px] font-bold border border-slate-300 ${color}`}
-            style={style}
-        >
-            {symbol}
-        </div>
-    );
 };
 
 export default VirtualLab;
